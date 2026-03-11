@@ -20,7 +20,13 @@ Once you get confirmation, kick off the experimentation.
 
 ## Experimentation
 
-Each experiment runs on a single GPU. The training script runs for a **fixed time budget of 5 minutes** (wall clock training time, excluding startup/compilation). You launch it simply as: `uv run train.py`.
+Each experiment runs on a single GPU. The training script runs for a **fixed time budget of 5 minutes** (wall clock training time, excluding startup/compilation).
+The running environment is on a Ubuntu host "r2d2.dahaus" and can be accessed by 
+```shell
+ssh -o "IdentitiesOnly=yes" -i id_ed25519_r2d2 alex@r2d2.dahaus
+cd ~/repos/llm-autoresearch
+```
+You launch it simply as: `uv run train.py`.
 
 **What you CAN do:**
 - Modify `train.py` — this is the only file you edit. Everything is fair game: model architecture, optimizer, hyperparameters, training loop, batch size, model size, etc.
