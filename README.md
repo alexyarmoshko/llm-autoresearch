@@ -20,7 +20,7 @@ If you are new to neural networks, this ["Dummy's Guide"](https://x.com/hooeem/s
 
 ## Quick start
 
-**Requirements:** A single NVIDIA GPU, Python 3.10+, [uv](https://docs.astral.sh/uv/). Hopper-class GPUs can use newer FlashAttention paths, while Linux Turing hosts can attempt FlashAttention-1 when the package and Torch build are ABI-compatible.
+**Requirements:** A single NVIDIA GPU, Python 3.10+, [uv](https://docs.astral.sh/uv/). Hopper-class GPUs can use newer FlashAttention paths, while Linux Turing hosts can use FlashAttention-1 with a compatible Torch/NumPy stack.
 
 ```bash
 
@@ -66,7 +66,7 @@ pyproject.toml  — dependencies
 
 ## Platform support
 
-This code currently requires that you have a single NVIDIA GPU. In principle it is quite possible to support CPU, MPS and other platforms but this would also bloat the code. On Linux Turing GPUs such as the RTX 2080 Ti, this repo can attempt FlashAttention-1 when the dependency and Torch ABI line up; otherwise it falls back to PyTorch SDPA. People can reference (or have their agents reference) the full/parent nanochat repository that has wider platform support and shows the various solutions for other accelerators, feel free to create forks or discussions for other platforms and I'm happy to link to them here in the README in some new notable forks section or etc.
+This code currently requires that you have a single NVIDIA GPU. In principle it is quite possible to support CPU, MPS and other platforms but this would also bloat the code. On Linux Turing GPUs such as the RTX 2080 Ti, this repo can run FlashAttention-1 when the environment uses a compatible stack such as Torch 2.2.x with CUDA 12.1 wheels and NumPy 1.26.x; otherwise it falls back to PyTorch SDPA. People can reference (or have their agents reference) the full/parent nanochat repository that has wider platform support and shows the various solutions for other accelerators, feel free to create forks or discussions for other platforms and I'm happy to link to them here in the README in some new notable forks section or etc.
 
 Seeing as there seems to be a lot of interest in tinkering with autoresearch on much smaller compute platforms than an H100, a few extra words. If you're going to try running autoresearch on smaller computers (Macbooks etc.), I'd recommend one of the forks below. On top of this, here are some recommendations for how to tune the defaults for much smaller models for aspiring forks:
 

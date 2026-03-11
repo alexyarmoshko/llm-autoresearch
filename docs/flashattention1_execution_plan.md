@@ -15,7 +15,7 @@ After this change, the training code can use a real FlashAttention-family kernel
 - [x] (2026-03-11 20:05Z) Patched `pyproject.toml`, `train.py`, and supporting docs so Linux installs can build FlashAttention-1 and the runtime prints a backend choice with safe SDPA fallback.
 - [x] (2026-03-11 20:15Z) Refreshed `uv.lock` on the remote Linux host and copied the resulting lockfile back into the local branch.
 - [x] (2026-03-11 20:24Z) Updated the remote Linux environment with `uv sync` and ran a full training validation.
-- [ ] Decide whether to stop at the safe fallback branch or take a larger step such as changing the Torch/FlashAttention compatibility matrix.
+- [x] (2026-03-11 22:03Z) Prototyped and adopted a Torch/NumPy compatibility matrix that actually runs FlashAttention-1 on the remote RTX 2080 Ti.
 
 ## Surprises & Discoveries
 
@@ -28,6 +28,9 @@ After this change, the training code can use a real FlashAttention-family kernel
 - Observation: FlashAttention-1 version `1.0.9` builds on the remote Linux host but fails to import at runtime against the current Torch stack.
   Evidence: validation log reported `undefined symbol: _ZN3c104cuda29c10_cuda_check_implementationEiPKcS2_jb` from `flash_attn_cuda...so`, after `uv sync` had already built and installed `flash-attn==1.0.9`.
 
+- Observation: FlashAttention-1 does run on the RTX 2080 Ti when the environment is moved to Torch 2.2.2 + CUDA 12.1 wheels + NumPy 1.26, and the model head dimension is reduced to 64.
+  Evidence: remote validation run `1394c1e_run.log` printed `Attention backend: flash-attn-v1` and completed with `val_bpb: 1.850956`.
+
 ## Decision Log
 
 - Decision: Treat this task as a dependency-and-runtime migration instead of another hyperparameter experiment.
@@ -38,9 +41,17 @@ After this change, the training code can use a real FlashAttention-family kernel
   Rationale: The user explicitly requested a new branch, and isolating the dependency migration reduces risk to the current tuned training frontier.
   Date/Author: 2026-03-11 / Codex
 
+- Decision: Move the branch from Torch 2.9.1 + CUDA 12.8 wheels to Torch 2.2.2 + CUDA 12.1 wheels, and pin NumPy below 2.
+  Rationale: FlashAttention-1 imported successfully only on the older Torch line, and Torch 2.2 warned about NumPy 2.x ABI compatibility.
+  Date/Author: 2026-03-11 / Codex
+
+- Decision: Reduce `HEAD_DIM` from 128 to 64 on the FA1 branch.
+  Rationale: FlashAttention-1 on Turing requires backward head dimension at most 64; larger heads fail during backpropagation.
+  Date/Author: 2026-03-11 / Codex
+
 ## Outcomes & Retrospective
 
-The migration produced a low-blast-radius branch that replaces the dead FA3 assumption with a Linux-only FlashAttention-1 dependency and an explicit runtime fallback. The branch is operational: `uv sync` works on the remote host and `uv run train.py` still completes a normal training run. However, the desired backend swap is incomplete because FlashAttention-1 cannot currently import against the repository's Torch 2.9.1 stack on that host, so the runtime remains on PyTorch SDPA.
+The migration first produced a safe fallback branch on the original Torch stack, then a working FlashAttention-1 branch after the compatibility matrix was adjusted. The final working recipe on the remote RTX 2080 Ti is: Torch 2.2.2 from the CUDA 12.1 wheel index, NumPy 1.26.4, FlashAttention-1 version 1.0.9, and model head dimension 64. With that stack, `uv sync` succeeds, `uv run train.py` prints `Attention backend: flash-attn-v1`, and the validation run improves to `val_bpb: 1.850956`.
 
 ## Context and Orientation
 
@@ -108,3 +119,5 @@ The official FlashAttention guidance relevant here is: Turing GPUs such as RTX 2
 Revision note: created the initial self-contained plan before code changes so the FA1 migration can be resumed from this file alone.
 
 Revision note: updated after remote validation to record that FlashAttention-1 builds successfully but fails to import at runtime against Torch 2.9.1, leaving the branch on the safe SDPA fallback path.
+
+Revision note: updated after the Torch 2.2 / NumPy 1.26 / head-dim-64 compatibility pass to record the first end-to-end FlashAttention-1 run on the remote Turing host.

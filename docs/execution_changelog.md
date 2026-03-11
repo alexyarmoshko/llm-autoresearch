@@ -8,3 +8,6 @@
 - Replaced the dead FA3 import path with an explicit FlashAttention-1-or-SDPA runtime selector and documented the Linux-only dependency in `pyproject.toml`.
 - Generated a new `uv.lock` on the remote Linux host and copied it back to the local branch because Windows cannot build `flash-attn` 1.x while locking.
 - Confirmed that `flash-attn==1.0.9` builds during `uv sync` on the remote host but fails to import at runtime against Torch 2.9.1, so the branch currently falls back to PyTorch SDPA.
+- Prototyped a Torch 2.2.2 + CUDA 12.1 environment on the remote host, confirmed that FlashAttention-1 imports there, and updated the branch to use that compatibility line.
+- Pinned `numpy<2` for the Torch 2.2 line, made the training code Torch-2.2-compatible, reduced `HEAD_DIM` to 64 to satisfy the Turing backward constraint, and validated a full FlashAttention-1 run.
+- Recorded the first working FA1 result on the remote host: commit `1394c1e`, `Attention backend: flash-attn-v1`, `val_bpb = 1.850956`.
