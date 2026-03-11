@@ -15,11 +15,24 @@ from dataclasses import dataclass, asdict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.attention import sdpa_kernel, SDPBackend
+try:
+    from torch.nn.attention import sdpa_kernel, SDPBackend
+except ImportError:
+    sdpa_kernel = None
+    SDPBackend = None
+
+torch_version_prefix = tuple(int(part) for part in torch.__version__.split("+", 1)[0].split(".")[:2])
+
+def maybe_compile(**kwargs):
+    if hasattr(torch, "compile") and torch_version_prefix >= (2, 3):
+        return torch.compile(**kwargs)
+    def identity(fn):
+        return fn
+    return identity
 
 cap = torch.cuda.get_device_capability()
 try:
-    from flash_attn.flash_attn_interface import flash_attn_func as flash_attn_v1_func
+    from flash_attn.flash_attn_interface import flash_attn_unpadded_qkvpacked_func as flash_attn_v1_func
     flash_attn_v1_import_error = None
 except Exception as exc:
     flash_attn_v1_func = None
@@ -43,7 +56,7 @@ class GPTConfig:
 
 
 def norm(x):
-    return F.rms_norm(x, (x.size(-1),))
+    return x * torch.rsqrt(x.square().mean(dim=-1, keepdim=True) + 1e-6)
 
 
 def has_ve(layer_idx, n_layer):
@@ -71,26 +84,41 @@ ATTENTION_BACKEND = choose_attention_backend()
 
 def run_attention(q, k, v, window_size):
     if ATTENTION_BACKEND == "flash-attn-v1":
+        batch_size, seq_len = q.shape[:2]
         flash_dtype = q.dtype
         if flash_dtype not in (torch.float16, torch.bfloat16):
             # FlashAttention-1 expects half precision inputs; keep the rest of the model in fp32 on Turing.
             flash_dtype = torch.float16
-        y = flash_attn_v1_func(
+        qkv = torch.stack([
             q.to(dtype=flash_dtype).contiguous(),
             k.to(dtype=flash_dtype).contiguous(),
             v.to(dtype=flash_dtype).contiguous(),
+        ], dim=2).reshape(batch_size * seq_len, 3, q.size(2), q.size(3))
+        cu_seqlens = torch.arange(
+            0, (batch_size + 1) * seq_len, seq_len,
+            device=q.device, dtype=torch.int32,
+        )
+        y = flash_attn_v1_func(
+            qkv,
+            cu_seqlens,
+            seq_len,
             dropout_p=0.0,
             causal=True,
-            window_size=window_size,
         )
-        return y.to(dtype=q.dtype)
+        return y.reshape(batch_size, seq_len, q.size(2), q.size(3)).to(dtype=q.dtype)
 
-    with sdpa_kernel([SDPBackend.MATH, SDPBackend.EFFICIENT_ATTENTION]):
-        return F.scaled_dot_product_attention(
-            q, k, v,
-            dropout_p=0.0,
-            is_causal=True,
-        )
+    if sdpa_kernel is not None and SDPBackend is not None:
+        with sdpa_kernel([SDPBackend.MATH, SDPBackend.EFFICIENT_ATTENTION]):
+            return F.scaled_dot_product_attention(
+                q, k, v,
+                dropout_p=0.0,
+                is_causal=True,
+            )
+    return F.scaled_dot_product_attention(
+        q, k, v,
+        dropout_p=0.0,
+        is_causal=True,
+    )
 
 
 class CausalSelfAttention(nn.Module):
@@ -337,8 +365,15 @@ polar_express_coeffs = [
     (2.3465413258596377, -1.7097828382687081, 0.42323551169305323),
 ]
 
-@torch.compile(dynamic=False, fullgraph=True)
+@maybe_compile(dynamic=False, fullgraph=True)
 def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_t, eps_t, wd_t):
+    device = p.device
+    step_t = step_t.to(device=device)
+    lr_t = lr_t.to(device=device)
+    beta1_t = beta1_t.to(device=device)
+    beta2_t = beta2_t.to(device=device)
+    eps_t = eps_t.to(device=device)
+    wd_t = wd_t.to(device=device)
     p.mul_(1 - lr_t * wd_t)
     exp_avg.lerp_(grad, 1 - beta1_t)
     exp_avg_sq.lerp_(grad.square(), 1 - beta2_t)
@@ -348,11 +383,12 @@ def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_
     step_size = lr_t / bias1
     p.add_(exp_avg / denom, alpha=-step_size)
 
-@torch.compile(dynamic=False, fullgraph=True)
+@maybe_compile(dynamic=False, fullgraph=True)
 def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momentum_buffer,
                     momentum_t, lr_t, wd_t, beta2_t, ns_steps, red_dim):
     # Nesterov momentum
-    momentum = momentum_t.to(stacked_grads.dtype)
+    device = stacked_grads.device
+    momentum = momentum_t.to(device=device, dtype=stacked_grads.dtype)
     momentum_buffer.lerp_(stacked_grads, 1 - momentum)
     g = stacked_grads.lerp_(momentum_buffer, momentum)
     # Polar express orthogonalization
@@ -370,7 +406,7 @@ def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momen
             X = a * X + B @ X
     g = X
     # NorMuon variance reduction
-    beta2 = beta2_t.to(g.dtype)
+    beta2 = beta2_t.to(device=device, dtype=g.dtype)
     v_mean = g.float().square().mean(dim=red_dim, keepdim=True)
     red_dim_size = g.size(red_dim)
     v_norm_sq = v_mean.sum(dim=(-2, -1), keepdim=True) * red_dim_size
@@ -382,8 +418,8 @@ def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momen
     final_scale = step_size * (v_norm / v_norm_new.clamp_min(1e-10))
     g = g * final_scale.to(g.dtype)
     # Cautious weight decay + parameter update
-    lr = lr_t.to(g.dtype)
-    wd = wd_t.to(g.dtype)
+    lr = lr_t.to(device=device, dtype=g.dtype)
+    wd = wd_t.to(device=device, dtype=g.dtype)
     mask = (g * stacked_params) >= 0
     stacked_params.sub_(lr * g + lr * wd * stacked_params * mask)
 
@@ -466,7 +502,7 @@ class MuonAdamW(torch.optim.Optimizer):
 
 # Model architecture
 ASPECT_RATIO = 64       # model_dim = depth * ASPECT_RATIO
-HEAD_DIM = 128          # target head dimension for attention
+HEAD_DIM = 64           # target head dimension for attention
 WINDOW_PATTERN = "SSSL" # sliding window pattern: L=full, S=half context
 
 # Optimization
@@ -551,7 +587,11 @@ optimizer = model.setup_optimizer(
     weight_decay=WEIGHT_DECAY,
 )
 
-model = torch.compile(model, dynamic=False)
+enable_torch_compile = hasattr(torch, "compile") and torch_version_prefix >= (2, 3)
+if enable_torch_compile:
+    model = torch.compile(model, dynamic=False)
+else:
+    print("torch.compile: disabled for this Torch version/backend combination")
 
 train_loader = make_dataloader(tokenizer, DEVICE_BATCH_SIZE, MAX_SEQ_LEN, "train")
 x, y, epoch = next(train_loader)  # prefetch first batch
