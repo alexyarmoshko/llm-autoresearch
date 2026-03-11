@@ -17,11 +17,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.attention import sdpa_kernel, SDPBackend
 
-from kernels import get_kernel
 cap = torch.cuda.get_device_capability()
-# varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
-repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
-fa3 = get_kernel(repo).flash_attn_interface
+try:
+    from flash_attn.flash_attn_interface import flash_attn_func as flash_attn_v1_func
+    flash_attn_v1_import_error = None
+except Exception as exc:
+    flash_attn_v1_func = None
+    flash_attn_v1_import_error = exc
 
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
 
@@ -58,6 +60,39 @@ def apply_rotary_emb(x, cos, sin):
     return torch.cat([y1, y2], 3)
 
 
+def choose_attention_backend():
+    if flash_attn_v1_func is not None and cap[0] < 8:
+        return "flash-attn-v1"
+    return "torch-sdpa"
+
+
+ATTENTION_BACKEND = choose_attention_backend()
+
+
+def run_attention(q, k, v, window_size):
+    if ATTENTION_BACKEND == "flash-attn-v1":
+        flash_dtype = q.dtype
+        if flash_dtype not in (torch.float16, torch.bfloat16):
+            # FlashAttention-1 expects half precision inputs; keep the rest of the model in fp32 on Turing.
+            flash_dtype = torch.float16
+        y = flash_attn_v1_func(
+            q.to(dtype=flash_dtype).contiguous(),
+            k.to(dtype=flash_dtype).contiguous(),
+            v.to(dtype=flash_dtype).contiguous(),
+            dropout_p=0.0,
+            causal=True,
+            window_size=window_size,
+        )
+        return y.to(dtype=q.dtype)
+
+    with sdpa_kernel([SDPBackend.MATH, SDPBackend.EFFICIENT_ATTENTION]):
+        return F.scaled_dot_product_attention(
+            q, k, v,
+            dropout_p=0.0,
+            is_causal=True,
+        )
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
@@ -90,13 +125,7 @@ class CausalSelfAttention(nn.Module):
         q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
         q, k = norm(q), norm(k)
 
-        # y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
-        with sdpa_kernel([SDPBackend.MATH, SDPBackend.EFFICIENT_ATTENTION]):
-            y = F.scaled_dot_product_attention(
-            q, k, v,
-            dropout_p=0.0,
-            is_causal=True,
-        )
+        y = run_attention(q, k, v, window_size)
         y = y.contiguous().view(B, T, -1)
         y = self.c_proj(y)
         return y
@@ -476,6 +505,12 @@ tokenizer = Tokenizer.from_directory()
 vocab_size = tokenizer.get_vocab_size()
 print(f"Vocab size: {vocab_size:,}")
 print(f"Compute dtype: {compute_dtype}, device batch size: {DEVICE_BATCH_SIZE}")
+if ATTENTION_BACKEND == "flash-attn-v1":
+    print("Attention backend: flash-attn-v1")
+elif flash_attn_v1_import_error is not None:
+    print(f"Attention backend: torch-sdpa (flash-attn-v1 unavailable: {flash_attn_v1_import_error})")
+else:
+    print("Attention backend: torch-sdpa")
 
 def build_model_config(depth):
     base_dim = depth * ASPECT_RATIO
