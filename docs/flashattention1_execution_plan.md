@@ -12,9 +12,10 @@ After this change, the training code can use a real FlashAttention-family kernel
 
 - [x] (2026-03-11 18:12Z) Created a dedicated branch `codex/flashattention1-swap` for the dependency and runtime change.
 - [x] (2026-03-11 18:14Z) Confirmed via remote probing that the execution host is an RTX 2080 Ti (`sm_75`), PyTorch Flash SDPA is unavailable there, and PyTorch efficient attention is available.
-- [ ] Patch `pyproject.toml`, `train.py`, and supporting docs so Linux installs can use FlashAttention-1 with a safe fallback.
-- [ ] Refresh `uv.lock` and update the remote Linux environment with `uv`.
-- [ ] Run a remote validation experiment and capture the observed backend and outcome.
+- [x] (2026-03-11 20:05Z) Patched `pyproject.toml`, `train.py`, and supporting docs so Linux installs can build FlashAttention-1 and the runtime prints a backend choice with safe SDPA fallback.
+- [x] (2026-03-11 20:15Z) Refreshed `uv.lock` on the remote Linux host and copied the resulting lockfile back into the local branch.
+- [x] (2026-03-11 20:24Z) Updated the remote Linux environment with `uv sync` and ran a full training validation.
+- [ ] Decide whether to stop at the safe fallback branch or take a larger step such as changing the Torch/FlashAttention compatibility matrix.
 
 ## Surprises & Discoveries
 
@@ -23,6 +24,9 @@ After this change, the training code can use a real FlashAttention-family kernel
 
 - Observation: The remote RTX 2080 Ti cannot use PyTorch Flash SDPA even though the global backend flag is enabled.
   Evidence: remote probe returned `can_use_flash_attention False` with a warning that flash attention only supports `sm80+`.
+
+- Observation: FlashAttention-1 version `1.0.9` builds on the remote Linux host but fails to import at runtime against the current Torch stack.
+  Evidence: validation log reported `undefined symbol: _ZN3c104cuda29c10_cuda_check_implementationEiPKcS2_jb` from `flash_attn_cuda...so`, after `uv sync` had already built and installed `flash-attn==1.0.9`.
 
 ## Decision Log
 
@@ -36,7 +40,7 @@ After this change, the training code can use a real FlashAttention-family kernel
 
 ## Outcomes & Retrospective
 
-Pending implementation.
+The migration produced a low-blast-radius branch that replaces the dead FA3 assumption with a Linux-only FlashAttention-1 dependency and an explicit runtime fallback. The branch is operational: `uv sync` works on the remote host and `uv run train.py` still completes a normal training run. However, the desired backend swap is incomplete because FlashAttention-1 cannot currently import against the repository's Torch 2.9.1 stack on that host, so the runtime remains on PyTorch SDPA.
 
 ## Context and Orientation
 
@@ -102,3 +106,5 @@ The official FlashAttention guidance relevant here is: Turing GPUs such as RTX 2
 `train.py` must end this work with a small backend-selection interface that can answer two questions: whether FlashAttention-1 is importable, and which attention backend is being used for the current run. The dependency surface should be limited to `flash-attn` on Linux and PyTorch SDPA as the fallback. The runtime should continue to call a single attention helper from `CausalSelfAttention.forward` so future experiments do not need to know which backend is active.
 
 Revision note: created the initial self-contained plan before code changes so the FA1 migration can be resumed from this file alone.
+
+Revision note: updated after remote validation to record that FlashAttention-1 builds successfully but fails to import at runtime against Torch 2.9.1, leaving the branch on the safe SDPA fallback path.
