@@ -11,3 +11,13 @@
 - Prototyped a Torch 2.2.2 + CUDA 12.1 environment on the remote host, confirmed that FlashAttention-1 imports there, and updated the branch to use that compatibility line.
 - Pinned `numpy<2` for the Torch 2.2 line, made the training code Torch-2.2-compatible, reduced `HEAD_DIM` to 64 to satisfy the Turing backward constraint, and validated a full FlashAttention-1 run.
 - Recorded the first working FA1 result on the remote host: commit `1394c1e`, `Attention backend: flash-attn-v1`, `val_bpb = 1.850956`.
+
+## 2026-03-12
+
+- Continued the FA1 branch on the same remote `uv` environment and found that much smaller effective batches dominate under the fixed 5-minute budget on the RTX 2080 Ti.
+- Advanced the frontier from `1394c1e` (`1.850956`) through repeated `TOTAL_BATCH_SIZE` reductions down to `9e333f2` (`1.308654`) at `2**13`.
+- Confirmed that going below the minimum legal batch with `DEVICE_BATCH_SIZE = 4` is invalid, and that lowering both device batch and total batch (`8d95b31`) regresses despite more steps.
+- Retuned the Muon small-batch neighborhood and bracketed a local optimum around `MATRIX_LR = 0.016`.
+- Retuned weight decay on the small-batch frontier and found the current best at commit `affdc07`, `val_bpb = 1.305262`, with `WEIGHT_DECAY = 0.075`.
+- Verified that a 5-layer model (`8399c67`) is close but still worse than the 6-layer configuration on this FA1 frontier.
+- Documented that `WINDOW_PATTERN` is still a no-op on the active attention paths, so the most credible future gain requires making local attention real rather than continuing blind window-pattern sweeps.

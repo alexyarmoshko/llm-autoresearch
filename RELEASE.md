@@ -14,3 +14,5 @@
 - This migration does not require rerunning `prepare.py` because dataset and tokenizer artifacts are independent of the attention kernel.
 - The original Torch 2.9.1 stack only validated the fallback path because `flash-attn==1.0.9` failed to import at runtime there.
 - On the compatible FA1 stack, the remote RTX 2080 Ti run completed with `Attention backend: flash-attn-v1` and `val_bpb = 1.850956`.
+- Continued tuning on the working FA1 stack pushed the best recorded result to `val_bpb = 1.305262` at commit `affdc07`, primarily by reducing `TOTAL_BATCH_SIZE` to `2**13` and retuning Muon hyperparameters.
+- The remaining high-value work is not more blind window-pattern tuning: `WINDOW_PATTERN` is currently a no-op on the active attention paths until local attention is implemented for FA1 or the fallback backend.
